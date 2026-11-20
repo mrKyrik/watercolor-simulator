@@ -1,8 +1,8 @@
 """
-ui.py - Sulu Boya Simulasyonu Arayuzu
-Desteklenen Modlar:
-1. Firca Modu (Surekli Surukleme / Continuous Brush Strokes)
-2. Damla Modu (Tekil Tiklama / Discrete Drops & Splatters)
+ui.py - Watercolor Simulation Interface
+Supported Modes:
+1. Brush Mode (Continuous Dragging / Continuous Brush Strokes)
+2. Drop Mode (Discrete Clicking / Discrete Drops & Splatters)
 """
 
 import sys
@@ -101,7 +101,7 @@ class RenderWorker(QThread):
             scale = PREVIEW_SCALE if cfg["preview"] else 1.0
             w, h  = int(CANVAS_W * scale), int(CANVAS_H * scale)
 
-            self.statusMsg.emit("Kagit dokusu olusturuluyor...")
+            self.statusMsg.emit("Generating paper texture...")
             wc = WaterColorCanvas(width=w, height=h)
             pp = cfg["paper"]
             wc.generate_paper_texture(
@@ -110,12 +110,12 @@ class RenderWorker(QThread):
                 intensity=pp["intensity"],
             )
 
-            # 1. FIRÇA DARBELERİ (STROKES)
+            # 1. BRUSH STROKES
             strokes = cfg.get("strokes", [])
             if strokes:
-                # Tüm darbeleri TEK BİR BİRLEŞİK AKIŞ (Unified Wash) olarak işle!
-                # Renkler farklı olsa dahi (Graded Wash), manifold tüm renkleri Shepard enterpolasyonuyla
-                # pürüzsüzce birbirine bağlar, beyaz çizgileri ve basamaklanmaları %100 yok eder!
+                # Process all strokes as a SINGLE UNIFIED WASH manifold!
+                # Even with different colors (Graded Wash), Shepard interpolation smoothly
+                # connects colors across the manifold, eliminating white seams and staircasing completely!
                 scaled_strokes = []
                 for st in strokes:
                     scaled_pts = [(p[0] * scale, p[1] * scale) for p in st["points"]]
@@ -124,7 +124,7 @@ class RenderWorker(QThread):
                     st_copy["radius"] = max(3.0, st["radius"] * scale)
                     scaled_strokes.append(st_copy)
 
-                self.statusMsg.emit(f"Birlesik firca akisi ({len(scaled_strokes)} darbe) isleniyor...")
+                self.statusMsg.emit(f"Processing unified brush wash ({len(scaled_strokes)} strokes)...")
                 if len(scaled_strokes) > 1:
                     wc.add_strokes_wash(scaled_strokes)
                 else:
@@ -140,10 +140,10 @@ class RenderWorker(QThread):
                         paper_interaction=st["paper_interaction"],
                     )
 
-            # 2. BİRLEŞİK DAMLALAR (DROPS)
+            # 2. UNIFIED DROPS
             drops = cfg.get("drops", [])
             if drops:
-                self.statusMsg.emit("Birlesik damla alani isleniyor...")
+                self.statusMsg.emit("Processing unified drop area...")
                 scaled_drops = []
                 for d in drops:
                     x = max(0, min(w - 1, int(d["x"] * scale)))
@@ -183,9 +183,9 @@ class RenderWorker(QThread):
                             dispersion=d.get("splatter_dispersion", 1.70),
                         )
 
-            # 3. AKIŞ VE DİFÜZYON
+            # 3. FLOW AND DIFFUSION
             fl = cfg["flow"]
-            self.statusMsg.emit("Akis simulasyonu...")
+            self.statusMsg.emit("Simulating fluid flow...")
             wc.simulate_flow(
                 iterations=fl["iterations"],
                 diffusion_rate=fl["diffusion_rate"],
@@ -194,21 +194,21 @@ class RenderWorker(QThread):
                 gravity_angle=fl["gravity_angle"],
             )
 
-            # 4. KURUMA
+            # 4. DRYING
             dr = cfg["drying"]
-            self.statusMsg.emit("Kuruma efekti...")
+            self.statusMsg.emit("Applying drying effect...")
             wc.apply_drying_shift(
                 value_shift=dr["value_shift"],
                 saturation_shift=dr["saturation_shift"],
             )
 
             elapsed = time.time() - t0
-            self.statusMsg.emit(f"Tamamlandi - {elapsed:.1f}s")
+            self.statusMsg.emit(f"Completed - {elapsed:.1f}s")
             arr = np.clip(wc.canvas, 0, 255).astype(np.uint8)
             self.finished.emit((arr, cfg["preview"]))
 
         except Exception as exc:
-            self.statusMsg.emit(f"Hata: {exc}")
+            self.statusMsg.emit(f"Error: {exc}")
             self.finished.emit(None)
 
 
@@ -224,7 +224,7 @@ class CanvasWidget(QLabel):
         self.setStyleSheet("background:#1a1a1a; border:1px solid #444;")
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
-        self.mode = "STROKE"  # "STROKE" veya "DROP"
+        self.mode = "STROKE"  # "STROKE" or "DROP"
         self.cur_brush_color = (40, 120, 200)
         self.cur_brush_radius = 25.0
         self.show_guides = True
@@ -247,7 +247,7 @@ class CanvasWidget(QLabel):
         p.setFont(QFont("Segoe UI", 20))
         p.drawText(
             pm.rect(), Qt.AlignmentFlag.AlignCenter,
-            "Firca ile cizin veya Damla ekleyin\nArdindan 'Onizleme'ye basin",
+            "Draw with brush or add drops\nThen press 'Preview'",
         )
         p.end()
         self._base_pm = pm
@@ -297,14 +297,14 @@ class CanvasWidget(QLabel):
         p.drawPixmap(rect.x(), rect.y(), scaled)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Çizilmiş fırça yolları (silik alan + kesikli merkez çizgisi + başlangıç/bitiş düğümleri)
+        # Drawn brush paths (faint area + dashed center line + start/end nodes)
         if self.show_guides:
             for s_idx, (pts, col, rad) in enumerate(self._strokes_paths):
                 if len(pts) > 1:
                     qc = QColor(col)
                     is_selected = (s_idx == self.selected_stroke_idx)
 
-                    # 1. Silik fırça genişliği alanı (tül gibi saydam)
+                    # 1. Faint brush width area
                     alpha_area = 70 if is_selected else 35
                     pen_w = max(2.0, (rad * 2.0) * (rect.width() / CANVAS_W))
                     pen_area = QPen(QColor(qc.red(), qc.green(), qc.blue(), alpha_area), pen_w,
@@ -317,7 +317,7 @@ class CanvasWidget(QLabel):
                         path.lineTo(QPointF(rect.x() + pt[0] * rect.width(), rect.y() + pt[1] * rect.height()))
                     p.drawPath(path)
 
-                    # 2. Kesikli merkez çizgisi (seçiliyse parlak altın, değilse zarif kontrastlı)
+                    # 2. Dashed center line (bright gold if selected, elegant contrast otherwise)
                     if is_selected:
                         pen_center = QPen(QColor(255, 215, 0, 240), 2.2, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap)
                     else:
@@ -325,18 +325,16 @@ class CanvasWidget(QLabel):
                     p.setPen(pen_center)
                     p.drawPath(path)
 
-                    # 3. Başlangıç (yeşil halka) ve Bitiş (kırmızı halka) düğümleri
+                    # 3. Start (green node) and End (red node) markers
                     p_end = QPointF(rect.x() + pts[-1][0] * rect.width(), rect.y() + pts[-1][1] * rect.height())
-                    # Başlangıç düğümü (fırçanın değdiği yer)
                     p.setPen(QPen(QColor(0, 0, 0, 200), 1.5))
-                    p.setBrush(QBrush(QColor(50, 205, 50, 220)))  # Yeşil
+                    p.setBrush(QBrush(QColor(50, 205, 50, 220)))  # Green
                     p.drawEllipse(p_start, 4.0, 4.0)
 
-                    # Bitiş düğümü (fırçanın kalktığı yer)
-                    p.setBrush(QBrush(QColor(255, 69, 0, 220)))   # Turuncu-Kırmızı
+                    p.setBrush(QBrush(QColor(255, 69, 0, 220)))   # Orange-Red
                     p.drawEllipse(p_end, 4.0, 4.0)
 
-        # Şu an çizilmekte olan fırça darbesi (canlı el hareketi)
+        # Currently active drawing stroke
         if self._is_drawing and len(self._current_stroke) > 1:
             rc, gc, bc = self.cur_brush_color
             pen_w = max(2.0, (self.cur_brush_radius * 2.0) * (rect.width() / CANVAS_W))
@@ -349,7 +347,7 @@ class CanvasWidget(QLabel):
                 path.lineTo(QPointF(rect.x() + (pt[0] / CANVAS_W) * rect.width(), rect.y() + (pt[1] / CANVAS_H) * rect.height()))
             p.drawPath(path)
 
-        # Damla işaretçileri (küçük şık halkalar)
+        # Drop markers (small elegant rings)
         if self.show_guides:
             for d_idx, (nx, ny, col) in enumerate(self._markers):
                 wx = rect.x() + int(nx * rect.width())
@@ -399,7 +397,7 @@ class CanvasWidget(QLabel):
             cx = max(0.0, min(float(CANVAS_W), lx / rect.width() * CANVAS_W))
             cy = max(0.0, min(float(CANVAS_H), ly / rect.height() * CANVAS_H))
 
-            # Son noktayla arasında en az 4 piksel varsa ekle
+            # Add if distance from last point is at least 4 pixels
             last_p = self._current_stroke[-1]
             if math.hypot(cx - last_p[0], cy - last_p[1]) >= 4.0:
                 self._current_stroke.append((cx, cy))
@@ -418,12 +416,12 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("💧 Sulu Boya Simulasyonu (Firca & Damla)")
+        self.setWindowTitle("💧 Watercolor Simulation (Brush & Drop)")
         self.resize(1380, 840)
 
         self._drops     = []
         self._strokes   = []
-        self._history   = []  # ("stroke", obj) veya ("drop", obj)
+        self._history   = []  # ("stroke", obj) or ("drop", obj)
         self._worker    = None
         self._cur_color = (40, 120, 200)
         self._save_path = ""
@@ -440,14 +438,14 @@ class MainWindow(QMainWindow):
         lv.setContentsMargins(6, 6, 6, 6)
         lv.setSpacing(6)
 
-        # Mod Seçici Butonlar
+        # Mode Selector Buttons
         mode_box = QHBoxLayout()
-        self.rb_stroke = QRadioButton("🖌️ Firca Modu (Surukle)")
-        self.rb_drop   = QRadioButton("💧 Damla Modu (Tikla)")
+        self.rb_stroke = QRadioButton("🖌️ Brush Mode (Drag)")
+        self.rb_drop   = QRadioButton("💧 Drop Mode (Click)")
         self.rb_stroke.setChecked(True)
         self.rb_stroke.toggled.connect(self._on_mode_changed)
 
-        self.cb_guides = QCheckBox("📐 Kilavuzlari Goster")
+        self.cb_guides = QCheckBox("📐 Show Guides")
         self.cb_guides.setChecked(True)
         self.cb_guides.toggled.connect(self._on_guides_toggled)
 
@@ -464,10 +462,10 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.canvas)
 
         btn_row = QHBoxLayout()
-        self.btn_preview = QPushButton("Onizleme")
-        self.btn_save    = QPushButton("Kaydet (Tam)")
-        self.btn_undo    = QPushButton("Geri Al")
-        self.btn_reset   = QPushButton("Sifirla")
+        self.btn_preview = QPushButton("Preview")
+        self.btn_save    = QPushButton("Save (Full)")
+        self.btn_undo    = QPushButton("Undo")
+        self.btn_reset   = QPushButton("Reset")
 
         self.btn_preview.clicked.connect(self._render_preview)
         self.btn_save.clicked.connect(self._render_full)
@@ -493,9 +491,9 @@ class MainWindow(QMainWindow):
         rv.setContentsMargins(8, 8, 8, 8)
         rv.setSpacing(8)
 
-        # Renk Seçici (Üst ortak alan)
+        # Color Picker (Top common area)
         crow = QHBoxLayout()
-        crow.addWidget(QLabel("Aktif Renk:"))
+        crow.addWidget(QLabel("Active Color:"))
         self.btn_color = QPushButton()
         self.btn_color.setFixedSize(90, 28)
         self.btn_color.clicked.connect(self._pick_color)
@@ -504,9 +502,9 @@ class MainWindow(QMainWindow):
         rv.addLayout(crow)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_brush_tab(), "🖌️ Firca")
-        tabs.addTab(self._build_drop_tab(),  "💧 Damla")
-        tabs.addTab(self._build_env_tab(),   "🌊 Ortam")
+        tabs.addTab(self._build_brush_tab(), "🖌️ Brush")
+        tabs.addTab(self._build_drop_tab(),  "💧 Drop")
+        tabs.addTab(self._build_env_tab(),   "🌊 Environment")
         rv.addWidget(tabs)
 
         rv.addWidget(self._build_list_panel())
@@ -518,7 +516,7 @@ class MainWindow(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Hazir - Firca ile cizin, ardindan Onizleme'ye basin.")
+        self.status_bar.showMessage("Ready - Draw with brush, then press Preview.")
 
     def _build_brush_tab(self):
         w  = QWidget()
@@ -526,12 +524,12 @@ class MainWindow(QMainWindow):
         vl.setSpacing(5)
         vl.setContentsMargins(4, 6, 4, 4)
 
-        self.p_br_radius   = ParamRow("Firca Capi:",     5, 150, 30, decimals=0)
-        self.p_br_intens   = ParamRow("Yogunluk:",     0.1, 1.0, 0.85)
-        self.p_br_edge     = ParamRow("Kenar Halkasi:",0.0, 1.0, 0.60)
-        self.p_br_dry      = ParamRow("Kuru Firca:",   0.0, 1.0, 0.45)
-        self.p_br_bristle  = ParamRow("Kil Lifleri:",  0.0, 1.0, 0.35)
-        self.p_br_paper    = ParamRow("Kagit Etkisi:", 0.0, 0.5, 0.12)
+        self.p_br_radius   = ParamRow("Brush Radius:",   5, 150, 30, decimals=0)
+        self.p_br_intens   = ParamRow("Intensity:",    0.1, 1.0, 0.85)
+        self.p_br_edge     = ParamRow("Edge Ring:",    0.0, 1.0, 0.60)
+        self.p_br_dry      = ParamRow("Dry Brush:",    0.0, 1.0, 0.45)
+        self.p_br_bristle  = ParamRow("Bristle Tracks:",0.0, 1.0, 0.35)
+        self.p_br_paper    = ParamRow("Paper Effect:", 0.0, 0.5, 0.12)
 
         self.p_br_radius.valueChanged.connect(self._sync_brush_radius)
 
@@ -548,38 +546,38 @@ class MainWindow(QMainWindow):
         vl.setSpacing(4)
         vl.setContentsMargins(4, 6, 4, 4)
 
-        self.p_radius   = ParamRow("Yaricap:",      10, 400, 150, decimals=0)
-        self.p_intens   = ParamRow("Yogunluk:",     0.1, 1.0, 0.80)
-        self.p_edge_dk  = ParamRow("Kenar:",        0.0, 1.0, 0.60)
+        self.p_radius   = ParamRow("Radius:",       10, 400, 150, decimals=0)
+        self.p_intens   = ParamRow("Intensity:",    0.1, 1.0, 0.80)
+        self.p_edge_dk  = ParamRow("Edge Ring:",    0.0, 1.0, 0.60)
         self.p_feather  = ParamRow("Feathering:",   0.0, 1.0, 0.40)
-        self.p_paper_ix = ParamRow("Kagit Etki:",   0.0, 0.5, 0.12)
+        self.p_paper_ix = ParamRow("Paper Effect:", 0.0, 0.5, 0.12)
 
         for pw in (self.p_radius, self.p_intens, self.p_edge_dk,
                    self.p_feather, self.p_paper_ix):
             vl.addWidget(pw)
 
-        self.splash_grp = QGroupBox("Sicrama")
+        self.splash_grp = QGroupBox("Splatter")
         self.splash_grp.setCheckable(True)
         self.splash_grp.setChecked(True)
         sg = QVBoxLayout(self.splash_grp)
-        self.p_spl_count      = ParamRow("Sayi:",         1,  40,  8,    decimals=0)
-        self.p_spl_scat_min   = ParamRow("Dagilim min:",  0.2, 2.5, 1.15)
-        self.p_spl_scat_max   = ParamRow("Dagilim max:",  0.5, 4.0, 1.80)
-        self.p_spl_intens     = ParamRow("Yogunluk:",     0.1, 1.0, 0.65)
-        self.p_spl_wet_react  = ParamRow("Zemin Etkisi:", 0.0, 1.0, 0.85)
-        self.p_spl_dispersion = ParamRow("Ciceklenme:",   1.0, 2.5, 1.70)
+        self.p_spl_count      = ParamRow("Count:",        1,  40,  8,    decimals=0)
+        self.p_spl_scat_min   = ParamRow("Scatter Min:",  0.2, 2.5, 1.15)
+        self.p_spl_scat_max   = ParamRow("Scatter Max:",  0.5, 4.0, 1.80)
+        self.p_spl_intens     = ParamRow("Intensity:",    0.1, 1.0, 0.65)
+        self.p_spl_wet_react  = ParamRow("Ground React:", 0.0, 1.0, 0.85)
+        self.p_spl_dispersion = ParamRow("Dispersion:",   1.0, 2.5, 1.70)
         for pw in (self.p_spl_count, self.p_spl_scat_min,
                    self.p_spl_scat_max, self.p_spl_intens,
                    self.p_spl_wet_react, self.p_spl_dispersion):
             sg.addWidget(pw)
         vl.addWidget(self.splash_grp)
 
-        self.bloom_grp = QGroupBox("Islak Bloom")
+        self.bloom_grp = QGroupBox("Wet Bloom")
         self.bloom_grp.setCheckable(True)
         self.bloom_grp.setChecked(True)
         bg = QVBoxLayout(self.bloom_grp)
-        self.p_bloom_str  = ParamRow("Guc:",   0.0, 1.0, 0.50)
-        self.p_bloom_size = ParamRow("Boyut:", 0.05, 0.5, 0.20)
+        self.p_bloom_str  = ParamRow("Strength:", 0.0, 1.0, 0.50)
+        self.p_bloom_size = ParamRow("Size:",     0.05, 0.5, 0.20)
         for pw in (self.p_bloom_str, self.p_bloom_size):
             bg.addWidget(pw)
         vl.addWidget(self.bloom_grp)
@@ -593,31 +591,31 @@ class MainWindow(QMainWindow):
         vl.setSpacing(6)
         vl.setContentsMargins(4, 6, 4, 4)
 
-        pg  = QGroupBox("Kagit Dokusu")
+        pg  = QGroupBox("Paper Texture")
         pgl = QVBoxLayout(pg)
-        self.p_pap_scale   = ParamRow("Olcek:",    50, 400, 200, decimals=0)
-        self.p_pap_octaves = ParamRow("Oktav:",     1,   8,   6, decimals=0)
-        self.p_pap_intens  = ParamRow("Yogunluk:", 0.0, 0.4, 0.12)
+        self.p_pap_scale   = ParamRow("Scale:",     50, 400, 200, decimals=0)
+        self.p_pap_octaves = ParamRow("Octaves:",    1,   8,   6, decimals=0)
+        self.p_pap_intens  = ParamRow("Intensity:", 0.0, 0.4, 0.12)
         for pw in (self.p_pap_scale, self.p_pap_octaves, self.p_pap_intens):
             pgl.addWidget(pw)
         vl.addWidget(pg)
 
-        flg = QGroupBox("Akis Simulasyonu")
+        flg = QGroupBox("Fluid Simulation")
         fll = QVBoxLayout(flg)
-        self.p_fl_iter  = ParamRow("Iterasyon:",    1, 30,  10, decimals=0)
-        self.p_fl_diff  = ParamRow("Difuzyon:",  0.01, 0.5, 0.12)
-        self.p_fl_turb  = ParamRow("Turbulans:", 0.0,  5.0, 1.5)
-        self.p_fl_grav  = ParamRow("Yer Cekimi:", 0.0, 1.0, 0.3)
-        self.p_fl_angle = ParamRow("Aci (deg):",   0, 360,  90, decimals=0)
+        self.p_fl_iter  = ParamRow("Iterations:",  1, 30,  10, decimals=0)
+        self.p_fl_diff  = ParamRow("Diffusion:", 0.01, 0.5, 0.12)
+        self.p_fl_turb  = ParamRow("Turbulence:",0.0,  5.0, 1.5)
+        self.p_fl_grav  = ParamRow("Gravity:",   0.0, 1.0, 0.3)
+        self.p_fl_angle = ParamRow("Angle (deg):", 0, 360,  90, decimals=0)
         for pw in (self.p_fl_iter, self.p_fl_diff, self.p_fl_turb,
                    self.p_fl_grav, self.p_fl_angle):
             fll.addWidget(pw)
         vl.addWidget(flg)
 
-        dg  = QGroupBox("Kuruma")
+        dg  = QGroupBox("Drying")
         dgl = QVBoxLayout(dg)
-        self.p_dry_val = ParamRow("Parlaklik:", -0.3, 0.3,  0.05)
-        self.p_dry_sat = ParamRow("Doygunluk:", -0.5, 0.5, -0.08)
+        self.p_dry_val = ParamRow("Value Shift:",      -0.3, 0.3,  0.05)
+        self.p_dry_sat = ParamRow("Saturation Shift:", -0.5, 0.5, -0.08)
         for pw in (self.p_dry_val, self.p_dry_sat):
             dgl.addWidget(pw)
         vl.addWidget(dg)
@@ -626,14 +624,14 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_list_panel(self):
-        grp = QGroupBox("Cizim Gecmisi")
+        grp = QGroupBox("Drawing History")
         lay = QVBoxLayout(grp)
         self.item_list = QListWidget()
         self.item_list.setMaximumHeight(160)
         self.item_list.setMinimumHeight(60)
         self.item_list.currentRowChanged.connect(self._on_item_selected)
         lay.addWidget(self.item_list)
-        del_btn = QPushButton("Seciliyi Sil")
+        del_btn = QPushButton("Delete Selected")
         del_btn.clicked.connect(self._delete_selected)
         lay.addWidget(del_btn)
         return grp
@@ -656,16 +654,16 @@ class MainWindow(QMainWindow):
     def _on_mode_changed(self):
         if self.rb_stroke.isChecked():
             self.canvas.mode = "STROKE"
-            self.status_bar.showMessage("Firca Modu: Tuval uzerinde fareyi surukleyerek cizin.")
+            self.status_bar.showMessage("Brush Mode: Drag mouse on canvas to draw.")
         else:
             self.canvas.mode = "DROP"
-            self.status_bar.showMessage("Damla Modu: Tuvale tiklayarak damla birakin.")
+            self.status_bar.showMessage("Drop Mode: Click on canvas to place drops.")
 
     def _sync_brush_radius(self, val):
         self.canvas.cur_brush_radius = float(val)
 
     def _pick_color(self):
-        qc = QColorDialog.getColor(QColor(*self._cur_color), self, "Renk Sec")
+        qc = QColorDialog.getColor(QColor(*self._cur_color), self, "Select Color")
         if qc.isValid():
             self._cur_color = (qc.red(), qc.green(), qc.blue())
             self.canvas.cur_brush_color = self._cur_color
@@ -693,15 +691,15 @@ class MainWindow(QMainWindow):
         self._strokes.append(stroke)
         self._history.append(("stroke", stroke))
 
-        # Önizleme overlayine ekle
+        # Add to preview overlay
         norm_pts = [(p[0] / CANVAS_W, p[1] / CANVAS_H) for p in points]
         self.canvas.addStrokePath(norm_pts, f"#{r:02X}{g:02X}{b:02X}", rad)
 
-        item = QListWidgetItem(f"🖌️ Firca ({len(points)} nokta)  R:{int(rad)}  #{r:02X}{g:02X}{b:02X}")
+        item = QListWidgetItem(f"🖌️ Stroke ({len(points)} pts)  R:{int(rad)}  #{r:02X}{g:02X}{b:02X}")
         item.setForeground(QColor(r, g, b))
         self.item_list.addItem(item)
         self.item_list.scrollToBottom()
-        self.status_bar.showMessage(f"Firca darbesi eklendi - 'Onizleme'ye basarak sulu boya akisini gorun.")
+        self.status_bar.showMessage("Brush stroke added - Press 'Preview' to view watercolor flow.")
 
     def _on_drop_placed(self, cx, cy):
         r, g, b = self._cur_color
@@ -729,11 +727,11 @@ class MainWindow(QMainWindow):
 
         self.canvas.addMarker(cx / CANVAS_W, cy / CANVAS_H, f"#{r:02X}{g:02X}{b:02X}")
 
-        item = QListWidgetItem(f"💧 Damla X:{int(cx):3d} Y:{int(cy):3d} R:{drop['radius']:3d} #{r:02X}{g:02X}{b:02X}")
+        item = QListWidgetItem(f"💧 Drop X:{int(cx):3d} Y:{int(cy):3d} R:{drop['radius']:3d} #{r:02X}{g:02X}{b:02X}")
         item.setForeground(QColor(r, g, b))
         self.item_list.addItem(item)
         self.item_list.scrollToBottom()
-        self.status_bar.showMessage(f"Damla eklendi - 'Onizleme'ye basin.")
+        self.status_bar.showMessage("Drop added - Press 'Preview'.")
 
     def _undo(self):
         if not self._history:
@@ -745,7 +743,7 @@ class MainWindow(QMainWindow):
             self._strokes.remove(obj)
         self.item_list.takeItem(self.item_list.count() - 1)
 
-        # Overlay'leri yeniden olustur
+        # Rebuild overlays
         self.canvas.clearOverlays()
         for d in self._drops:
             rc, gc, bc = d["color"]
@@ -755,11 +753,11 @@ class MainWindow(QMainWindow):
             npts = [(p[0] / CANVAS_W, p[1] / CANVAS_H) for p in st["points"]]
             self.canvas.addStrokePath(npts, f"#{rc:02X}{gc:02X}{bc:02X}", st["radius"])
 
-        self.status_bar.showMessage(f"Geri alindi.")
+        self.status_bar.showMessage("Undone.")
 
     def _reset(self):
         if QMessageBox.question(
-            self, "Sifirla", "Tum cizimler silinecek. Emin misin?",
+            self, "Reset", "All drawings will be cleared. Are you sure?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) != QMessageBox.StandardButton.Yes:
             return
@@ -769,7 +767,7 @@ class MainWindow(QMainWindow):
         self.canvas.clearOverlays()
         self.canvas._init_placeholder()
         self.item_list.clear()
-        self.status_bar.showMessage("Tuval sifirlandi.")
+        self.status_bar.showMessage("Canvas reset.")
 
     def _delete_selected(self):
         row = self.item_list.currentRow()
@@ -791,7 +789,7 @@ class MainWindow(QMainWindow):
             npts = [(p[0] / CANVAS_W, p[1] / CANVAS_H) for p in st["points"]]
             self.canvas.addStrokePath(npts, f"#{rc:02X}{gc:02X}{bc:02X}", st["radius"])
 
-        self.status_bar.showMessage(f"Oge silindi.")
+        self.status_bar.showMessage("Item deleted.")
 
     def _build_config(self, preview):
         return {
@@ -818,7 +816,7 @@ class MainWindow(QMainWindow):
 
     def _start_render(self, preview):
         if self._worker and self._worker.isRunning():
-            self.status_bar.showMessage("Render hala calisiyor...")
+            self.status_bar.showMessage("Render is still running...")
             return
         self._set_buttons_enabled(False)
         self._worker = RenderWorker(self._build_config(preview))
@@ -831,7 +829,7 @@ class MainWindow(QMainWindow):
 
     def _render_full(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "PNG Olarak Kaydet", "output_paper.png", "PNG (*.png)"
+            self, "Save as PNG", "output_paper.png", "PNG (*.png)"
         )
         if not path:
             return
@@ -849,14 +847,13 @@ class MainWindow(QMainWindow):
         arr, was_preview = result
         self.canvas.setImage(arr)
 
-        # Render sonucu tuval altligina yerlestirilir, kilavuzlar ise silinmeyip
-        # kullanicinin cizim rotasini gostererek ekranda kalmaya devam eder!
+        # Render result is placed on canvas background while guides remain visible
         self.canvas._redraw()
 
         if not was_preview and self._save_path:
             out_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             cv2.imwrite(self._save_path, out_bgr)
-            self.status_bar.showMessage(f"Kaydedildi -> {self._save_path}")
+            self.status_bar.showMessage(f"Saved -> {self._save_path}")
 
     def _set_buttons_enabled(self, enabled):
         for btn in (self.btn_preview, self.btn_save,

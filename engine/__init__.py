@@ -1,6 +1,6 @@
 """
-Fiziksel Sulu Boya Simülasyon Motoru (Physics-Based Watercolor Engine)
-Akışkanlar Mekaniği, Kılcallık, Deegan Buharlaşması ve Kubelka-Munk Optiği
+Physics-Based Watercolor Engine
+Fluid Dynamics, Capillarity, Deegan Evaporation, and Kubelka-Munk Optics
 """
 
 from .paper import PaperSubstrate

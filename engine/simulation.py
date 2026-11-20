@@ -13,15 +13,15 @@ from .noise import fast_fractal_noise_gpu
 
 class WatercolorEngine:
     """
-    Çok-Ölçekli Hibrit Sulu Boya Simülasyon Motoru (Multiscale Hybrid Watercolor Engine)
+    Multiscale Hybrid Watercolor Simulation Engine
     
-    1. Makro Ölçek: Navier-Stokes Sığ Su, yerçekimi, yüzey gerilimi, kılcal emiş ve Kubelka-Munk
-    2. Mikro Ölçek (Fenomenolojik Alt-Izgara):
-       - Centripetal Catmull-Rom fırça yolu ve hız dinamiği
-       - Çok oktavlı fraktal kenar deformasyonu (yırtık ve lifli sınırlar)
-       - Kıl lifleri (bristle tracks) ve kuru fırça (dry brush) yarıkları
-       - Jilet gibi keskin Gauss kenar halkası (menisküs kahve lekesi)
-       - Çok ölçekli gövde pıhtılaşması (mottling / puddling) ve kağıt granülasyonu
+    1. Macro Scale: Navier-Stokes Shallow Water, gravity, surface tension, capillary suction, and Kubelka-Munk
+    2. Micro Scale (Phenomenological Sub-Grid):
+       - Centripetal Catmull-Rom brush path and velocity dynamics
+       - Multi-octave fractal edge deformation (torn and fibrous boundaries)
+       - Bristle tracks and dry brush gaps
+       - Sharp Gaussian edge ring (meniscus coffee ring)
+       - Multi-scale body mottling / puddling and paper granulation
     """
 
     def __init__(
@@ -36,7 +36,7 @@ class WatercolorEngine:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.base_color = base_color
 
-        # Fiziksel Bileşenler
+        # Physical Components
         self.paper = PaperSubstrate(
             width=width,
             height=height,
@@ -61,6 +61,9 @@ class WatercolorEngine:
             device=self.device,
         )
 
+        # Multi-Layer Glaze Stack (Wet-on-Dry Stratified Glazes)
+        self.dried_glazes: list[dict] = []
+
         y_ind, x_ind = torch.meshgrid(
             torch.arange(height, device=self.device, dtype=torch.float32) + 0.5,
             torch.arange(width, device=self.device, dtype=torch.float32) + 0.5,
@@ -70,20 +73,61 @@ class WatercolorEngine:
         self.grid_y = y_ind
 
     def reset(self):
-        """Tuvali ve tüm fiziksel durumları sıfırlar."""
+        """Resets the canvas and all physical states, including dried glazes."""
         self.fluid.h.zero_()
         self.fluid.u.zero_()
         self.fluid.v.zero_()
         self.paper.reset_moisture()
         self.pigments.reset()
+        self.dried_glazes.clear()
+
+    def dry_current_wash(self):
+        """
+        Commits all active fluid and pigment into a permanent, dried glaze layer.
+        Enables multi-layer wet-on-dry watercolor glazing:
+        - Active deposited pigments are locked into a permanent optical layer.
+        - Fluid and paper moisture evaporate to dry state (h=0, m=0).
+        - Subsequent brush strokes sit transparently over this layer without muddying.
+        """
+        if not self.pigments.layers:
+            return
+
+        h_dim, w_dim = self.height, self.width
+        k_total = torch.zeros((3, h_dim, w_dim), dtype=torch.float32, device=self.device)
+        s_total = torch.zeros((3, h_dim, w_dim), dtype=torch.float32, device=self.device)
+        total_thickness = torch.zeros((1, h_dim, w_dim), dtype=torch.float32, device=self.device)
+
+        has_pigment = False
+        for lyr in self.pigments.layers:
+            # When dried, all remaining suspended pigment (c) deposits onto fibers (d)
+            conc = (lyr.c + lyr.d).unsqueeze(0)
+            if float(conc.max().item()) > 1e-4:
+                has_pigment = True
+            total_thickness += conc
+            k_total += conc * lyr.km_k.view(3, 1, 1)
+            s_total += conc * lyr.km_s.view(3, 1, 1)
+
+        if has_pigment:
+            self.dried_glazes.append({
+                "k": k_total,
+                "s": s_total,
+                "thickness": total_thickness,
+            })
+
+        # Evaporate active water and clear active layers for next wash
+        self.fluid.h.zero_()
+        self.fluid.u.zero_()
+        self.fluid.v.zero_()
+        self.paper.reset_moisture()
+        self.pigments.layers.clear()
 
     # ------------------------------------------------------------------
-    # Fırça Darbesi Dinamiği (Çok-Ölçekli Hibrit ROI)
+    # Brush Stroke Dynamics (Multiscale Hybrid ROI)
     # ------------------------------------------------------------------
 
     @staticmethod
     def _catmull_rom_centripetal(points: list[tuple[float, float]], samples_per_seg: int = 8) -> list[tuple[float, float, float]]:
-        """Centripetal Catmull-Rom spline enterpolasyonu ve hız profili."""
+        """Centripetal Catmull-Rom spline interpolation and velocity profiling."""
         if len(points) < 2:
             return [(p[0], p[1], 1.0) for p in points]
         if len(points) == 2:
@@ -141,12 +185,12 @@ class WatercolorEngine:
         staining: float = 0.5,
     ):
         """
-        Organik ve zengin fırça darbesi:
-        - Fraktal mesafe alanı deformasyonu
-        - Keskin menisküs kenar halkası (Gauss)
-        - Çok ölçekli gövde pıhtılaşması (Mottling)
-        - Kıl lifleri ve kuru fırça yarığı
-        - Sığ su ve pigment yüklemesi
+        Organic and rich brush stroke deposition:
+        - Fractal distance field deformation
+        - Sharp meniscus edge ring (Gaussian)
+        - Multi-scale body mottling
+        - Bristle tracks and dry brush scumbling
+        - Shallow water and pigment deposit
         """
         if not points:
             return
@@ -171,14 +215,14 @@ class WatercolorEngine:
         if roi_w <= 0 or roi_h <= 0:
             return
 
-        # ROI Grid (+0.5 alt-piksel merkezleme)
+        # ROI Grid (+0.5 sub-pixel centering)
         roi_y = torch.arange(min_y, max_y, device=self.device, dtype=torch.float32).view(-1, 1) + 0.5
         roi_x = torch.arange(min_x, max_x, device=self.device, dtype=torch.float32).view(1, -1) + 0.5
 
         sub_phi = torch.full((roi_h, roi_w), 1e6, dtype=torch.float32, device=self.device)
         sub_speed = torch.zeros((roi_h, roi_w), dtype=torch.float32, device=self.device)
 
-        # Çizgi segmentleri mesafe projeksiyonu (GPU tensörleri)
+        # Line segment distance projection (GPU tensors)
         for i in range(len(curve) - 1):
             ax, ay, sp_a = curve[i]
             bx, by, sp_b = curve[i + 1]
@@ -204,59 +248,60 @@ class WatercolorEngine:
             sub_phi = torch.where(mask_update, u_k, sub_phi)
             sub_speed = torch.where(mask_update, sp_local, sub_speed)
 
-        # GPU Çok-Ölçekli Fraktal Gürültü Katmanları (Bant sınırlı - minimum dalga boyu >= 6px)
+        # GPU Multi-Scale Fractal Noise Layers (Band limited - minimum wavelength >= 6px)
         f_shape = fast_fractal_noise_gpu(roi_w, roi_h, max(radius * 0.40, 8.0), 3, device=self.device)
         f_edge  = fast_fractal_noise_gpu(roi_w, roi_h, 14.0, 3, device=self.device)
         f_gran  = fast_fractal_noise_gpu(roi_w, roi_h, 12.0, 3, device=self.device)
 
-        # 1. Kenar fraktal deformasyonu ve Analitik Sub-Pixel Antialiasing
+        # 1. Edge fractal deformation and Analytical Sub-Pixel Antialiasing
         sub_phi = sub_phi * (1.0 + (f_shape - 0.5) * 0.25)
-        # Fiziksel kılcallığa ve pigment konsantrasyonuna duyarlı dinamik geçiş genişliği:
+        # Capillary-sensitive and concentration-aware dynamic transition width:
         d_px = 7.0 * (1.0 + 0.25 * intensity)
         delta_phi = max(d_px / float(max(radius, 2.0)), 0.050)
         edge_falloff = torch.clamp((1.0 - sub_phi) / delta_phi, 0.0, 1.0)
         smooth_inside = edge_falloff * edge_falloff * (3.0 - 2.0 * edge_falloff)
 
-        # Gövde Yıkama Çekirdeği: İç bölgede tam doluluk (0.0 ile 0.60 arası homojen)
+        # Body Wash Kernel: Full interior coverage (homogeneous between 0.0 and 0.60)
         interior_ramp = torch.clamp((sub_phi - 0.60) / 0.38, 0.0, 1.0)
         wash_kernel = 1.0 - 0.25 * (interior_ramp ** 2)
 
-        # 2. Kağıt lif kuru fırça eşiklemesi (Doğal lif scumbling)
+        # 2. Paper fiber dry brush thresholding (Natural fiber scumbling)
         sub_texture = self.paper.texture_norm[min_y:max_y, min_x:max_x]
         dry_threshold = dry_brush * torch.clamp(sub_speed / 2.0, 0.0, 1.0) * 0.55
         dry_factor = torch.clamp((sub_texture - dry_threshold + 0.20) / 0.40, 0.0, 1.0)
         dry_mask = 0.20 + 0.80 * dry_factor
 
-        # 3. Fırça kıl lifi faktörü
+        # 3. Brush bristle factor
         bristle_factor = 1.0 - bristle_strength * 0.35 * torch.clamp(sub_speed / 1.5, 0.3, 1.0)
 
-        # Mevcut Zemin Islaklığı Taraması (Wet-Awareness)
-        # Zemin önceden ıslaksa iç kenar halkası iptal edilir ve boya liflere kilitlenmez!
+        # Ground Wetness Check (Wet-Awareness)
+        # If ground is already wet, inner edge ring is suppressed and paint does not pin to fibers!
         existing_h = self.fluid.h[min_y:max_y, min_x:max_x]
         dry_boundary_mask = torch.clamp((0.10 - existing_h) / 0.08, 0.0, 1.0)
         is_dry_surface = torch.clamp((0.12 - existing_h) / 0.10, 0.0, 1.0)
 
-        # 4. Tekil Monoton Menisküs Kenar Halkası (Koloidal Tıkanma / Jamming Doyumu ile)
-        # DİKKAT: Yalnızca kuru kağıtla temas eden dış temas hattında oluşur!
+        # 4. Single Monotonic Meniscus Edge Ring (with Colloidal Jamming Saturation)
+        # Note: Only formed at the outer contact line touching dry paper!
         ring_pos = 0.94 + (f_edge - 0.5) * 0.04
         edge_ring = torch.exp(-((sub_phi - ring_pos) ** 2) / (2.0 * 0.070 ** 2))
-        jammed_edge_darkening = edge_darkening / (1.0 + 0.50 * intensity)
-        edge_alpha = edge_ring * jammed_edge_darkening * 0.60 * dry_boundary_mask
+        jammed_edge_darkening = edge_darkening / (1.0 + 0.30 * intensity)
+        edge_alpha = edge_ring * jammed_edge_darkening * 0.75 * dry_boundary_mask
 
-        # 5. Kağıt Lif Topoğrafyası Odaklı Pıhtılaşma (Mottling)
+        # 5. Paper Fiber Topography Mottling
         conc = torch.clamp((0.5 - sub_texture) * 0.40 + f_gran * 0.45 + 0.35, 0.0, 1.0) ** 1.15
-        core_alpha = wash_kernel * torch.clamp(conc * 1.30 + 0.20, 0.0, 1.0) * intensity
-        alpha = torch.clamp(core_alpha + edge_alpha, 0.0, 1.0) * smooth_inside * dry_mask * bristle_factor
+        core_alpha = wash_kernel * torch.clamp(conc * 1.05 + 0.15, 0.0, 1.0) * intensity
+        # Balanced density: Interior remains smooth and even, while meniscus edge builds naturally
+        alpha = torch.clamp(core_alpha + edge_alpha, 0.0, 1.5) * smooth_inside * dry_mask * bristle_factor
 
-        # 6. Mikro Lif Granülasyonu ve Doku Eğilimi (Yalnızca kuru liflerde tutunur)
+        # 6. Micro Fiber Granulation and Texture Bias (Only attaches to dry fibers)
         grain = (torch.rand((roi_h, roi_w), device=self.device) * 2.0 - 1.0)
         granulation_bias = grain * sub_texture * 0.05 * alpha * is_dry_surface
         texture_bias = (0.5 - sub_texture) * paper_interaction * alpha * is_dry_surface
 
-        # Sıvı Katmanına Yükleme (Sığ Su Akışkanı için su yüksekliği h)
-        self.fluid.h[min_y:max_y, min_x:max_x] += alpha * water_amount
+        # Deposit into Fluid Layer (water height h for shallow water solver)
+        self.fluid.h[min_y:max_y, min_x:max_x] += torch.clamp(alpha, 0.0, 1.0) * water_amount
 
-        # Pigment Katmanına Yükleme
+        # Deposit into Pigment Layer
         col_norm = (color_rgb[0] / 255.0, color_rgb[1] / 255.0, color_rgb[2] / 255.0)
         layer_name = f"Pigment_{color_rgb[0]}_{color_rgb[1]}_{color_rgb[2]}" if pigment_name == "Custom" else pigment_name
         layer = self.pigments.get_or_create_layer(
@@ -266,15 +311,15 @@ class WatercolorEngine:
             staining=staining,
         )
         
-        # 7. Langmuir Yüzey Adsorpsiyon Doygunluğu (Aşırı kararmayı engeller)
+        # 7. Langmuir Surface Adsorption Saturation (Prevents artificial over-darkening)
         max_d = 2.6
         current_d = layer.d[min_y:max_y, min_x:max_x]
         capacity_factor = torch.clamp((max_d - current_d) / max_d, 0.15, 1.0)
-        effective_deposit = alpha * intensity * 2.5 * capacity_factor
+        effective_deposit = alpha * intensity * 2.2 * capacity_factor
 
-        # Islak zeminde pigment liflere kilitlenmez, %100 serbest sıvıya (layer.c) geçer!
-        # Böylece sığ su ve difüzyon darbeleri pürüzsüzce homojenleştirir!
-        initial_stain = max(0.40, 0.50 * layer.staining) * is_dry_surface
+        # Fresh paint remains predominantly in fluid suspension (layer.c), allowing Deegan
+        # advection and valley granulation during drying, with balanced initial fiber stain.
+        initial_stain = max(0.08, 0.18 * layer.staining) * is_dry_surface
         layer.d[min_y:max_y, min_x:max_x] += effective_deposit * initial_stain + (granulation_bias + texture_bias)
         layer.c[min_y:max_y, min_x:max_x] += effective_deposit * (1.0 - initial_stain)
 
@@ -287,9 +332,9 @@ class WatercolorEngine:
         granulation: float = 0.5,
         staining: float = 0.5,
     ):
-        """Birden çok birbirine değen veya paralel fırça darbesini TEK BİR birleşik akışkan alanı (Unified Manifold) olarak işler.
-        Tüm darbelerin mesafe alanları tek bir potansiyelde birleştirilir: phi_unified = min_i(phi_i).
-        Böylece darbeler arasındaki iç beyaz çizgiler ve dikişler %100 yok edilir; tüm alan tek bir fırça darbesi gibi akar."""
+        """Processes multiple touching or parallel brush strokes as a SINGLE Unified Manifold fluid domain.
+        All strokes' distance fields are merged into one potential: phi_unified = min_i(phi_i).
+        Eliminates inner white seams between strokes by 100%, flowing the entire region like a single stroke."""
         if not strokes:
             return
 
@@ -320,7 +365,7 @@ class WatercolorEngine:
         roi_x = self.grid_x[min_y:max_y, min_x:max_x]
         roi_y = self.grid_y[min_y:max_y, min_x:max_x]
 
-        # Tekil birleşik mesafe alanı (phi_unified)
+        # Single unified distance field (phi_unified)
         phi_unified = torch.full((roi_h, roi_w), 1e6, dtype=torch.float32, device=self.device)
         speed_unified = torch.zeros((roi_h, roi_w), dtype=torch.float32, device=self.device)
 
@@ -385,23 +430,23 @@ class WatercolorEngine:
         avg_bristle /= n_s
         avg_pap_ix /= n_s
 
-        # TEK BİR BİRLEŞİK ALAN ÜZERİNE FRAKTAL GÜRÜLTÜ VE SÜREKLİ MENİSKÜS UYGULA
+        # APPLY FRACTAL NOISE AND CONTINUOUS MENISCUS ON UNIFIED FIELD
         f_shape = fast_fractal_noise_gpu(roi_w, roi_h, max(max_r * 0.40, 8.0), 3, device=self.device)
         f_edge = fast_fractal_noise_gpu(roi_w, roi_h, 14.0, 3, device=self.device)
         f_gran = fast_fractal_noise_gpu(roi_w, roi_h, 12.0, 3, device=self.device)
 
         phi_deformed = phi_unified * (1.0 + (f_shape - 0.5) * 0.25)
-        # Fiziksel kılcallığa ve ortalama pigment konsantrasyonuna duyarlı dinamik geçiş:
+        # Capillary-sensitive dynamic transition width:
         d_px = 7.0 * (1.0 + 0.25 * avg_intensity)
         delta_phi = max(d_px / float(max(max_r, 2.0)), 0.050)
         edge_falloff = torch.clamp((1.0 - phi_deformed) / delta_phi, 0.0, 1.0)
         smooth_inside = edge_falloff * edge_falloff * (3.0 - 2.0 * edge_falloff)
 
-        # Gövde kesintisiz düz doluluk (İç darbeler arasındaki dalgalanmayı ve beyaz çizgileri %100 sıfırlar!)
+        # Body Wash Kernel (Eliminates interior seams)
         interior_ramp = torch.clamp((phi_deformed - 0.60) / 0.38, 0.0, 1.0)
         wash_kernel = 1.0 - 0.25 * (interior_ramp ** 2)
 
-        # Kağıt lif kuru fırça
+        # Paper fiber dry brush
         sub_texture = self.paper.texture_norm[min_y:max_y, min_x:max_x]
         dry_threshold = avg_dry_brush * torch.clamp(speed_unified / 2.0, 0.0, 1.0) * 0.55
         dry_factor = torch.clamp((sub_texture - dry_threshold + 0.20) / 0.40, 0.0, 1.0)
@@ -409,7 +454,7 @@ class WatercolorEngine:
 
         bristle_factor = 1.0 - avg_bristle * 0.35 * torch.clamp(speed_unified / 1.5, 0.3, 1.0)
 
-        # TEK BİR DIŞ ÇEPER HALKASI (Koloidal Tıkanma / Jamming Doyumu ile)
+        # SINGLE OUTER PERIMETER RING (with Colloidal Jamming Saturation)
         ring_pos = 0.94 + (f_edge - 0.5) * 0.04
         edge_ring = torch.exp(-((phi_deformed - ring_pos) ** 2) / (2.0 * 0.070 ** 2))
         jammed_edge_darkening = avg_edge_darkening / (1.0 + 0.50 * avg_intensity)
@@ -423,11 +468,11 @@ class WatercolorEngine:
         granulation_bias = grain * sub_texture * 0.05 * alpha
         texture_bias = (0.5 - sub_texture) * avg_pap_ix * alpha
 
-        # TEK BİR SIVI GÖLÜ OLARAK YÜKLE
+        # LOAD AS A SINGLE FLUID POOL
         self.fluid.h[min_y:max_y, min_x:max_x] += alpha * water_amount
 
-        # ÇOKLU RENK ENTEGRASYONU (Shepard / Smooth Partition of Unity for Graded Wash)
-        # Her darbe kendi rengini taşır ve aralarında ipeksi, basamaksız bir degrade oluşturur!
+        # MULTI-COLOR INTEGRATION (Shepard / Smooth Partition of Unity for Graded Wash)
+        # Each stroke carries its color, forming a seamless, step-free gradient!
         sigma_c = 0.85
         weights = []
         for u_s in stroke_u_fields:
@@ -437,7 +482,7 @@ class WatercolorEngine:
         sum_w = torch.clamp(sum(weights), min=1e-5)
         normalized_weights = [w / sum_w for w in weights]
 
-        # Her bir renk için pigment katmanına pürüzsüz yükleme:
+        # Smooth pigment loading for each color:
         for k, st in enumerate(strokes):
             col = st.get("color", color_rgb or (40, 100, 200))
             col_norm = (col[0] / 255.0, col[1] / 255.0, col[2] / 255.0)
@@ -454,7 +499,7 @@ class WatercolorEngine:
             current_d = layer.d[min_y:max_y, min_x:max_x]
             capacity_factor = torch.clamp((max_d - current_d) / max_d, 0.15, 1.0)
 
-            # Bu renk katmanına düşen pürüzsüz pay:
+            # Smooth share assigned to this color layer:
             dep_k = alpha * avg_intensity * 2.5 * capacity_factor * w_share
 
             initial_stain = max(0.40, 0.50 * layer.staining)
@@ -462,11 +507,11 @@ class WatercolorEngine:
             layer.c[min_y:max_y, min_x:max_x] += dep_k * (1.0 - initial_stain)
 
     # ------------------------------------------------------------------
-    # Birleşik Damlalar ve Kümeler (Drops & Clusters)
+    # Unified Drops & Clusters
     # ------------------------------------------------------------------
 
     def add_pigment_cluster(self, drops: list[dict]):
-        """Birleşik sıvı damla kümesini organik fraktal profille tuvale bırakır."""
+        """Deposits a unified fluid drop cluster onto canvas with organic fractal profile."""
         if not drops:
             return
 
@@ -507,37 +552,38 @@ class WatercolorEngine:
         avg_paper_interaction /= n_drops
         avg_radius = sum(float(d.get("radius", 40.0)) for d in drops) / max(n_drops, 1)
 
-        # Sub-Pixel C1 Antialiasing (Pikselleşmeyi sıfırlar)
+        # Sub-Pixel C1 Antialiasing (Eliminates pixelation)
         d_px = 7.0 * (1.0 + 0.25 * avg_intensity)
         delta_phi = max(d_px / float(max(avg_radius, 2.0)), 0.050)
         edge_falloff = torch.clamp((1.0 - phi_unified) / delta_phi, 0.0, 1.0)
         smooth_inside = edge_falloff * edge_falloff * (3.0 - 2.0 * edge_falloff)
 
-        # Gövde Yıkama Çekirdeği (Kesintisiz doluluk)
-        wash_kernel = torch.clamp(1.0 - 0.35 * (phi_unified ** 2), 0.0, 1.0)
+        # Body Wash Kernel (Continuous, balanced interior)
+        wash_kernel = torch.clamp(0.85 - 0.20 * (phi_unified ** 2), 0.0, 1.0)
 
-        # Kağıt Lif Topoğrafyası ve Granülasyon Odaklı Gövde Dokusu
+        # Paper Fiber Topography and Granulation Body Texture
         c_gran = fast_fractal_noise_gpu(self.width, self.height, 12.0, 3, device=self.device)
         pigment_conc = torch.clamp((0.5 - self.paper.texture_norm) * 0.40 + c_gran * 0.45 + 0.35, 0.0, 1.0) ** 1.15
 
-        core_alpha = wash_kernel * torch.clamp(pigment_conc * 1.30 + 0.20, 0.0, 1.0) * avg_intensity
+        core_alpha = wash_kernel * torch.clamp(pigment_conc * 1.05 + 0.15, 0.0, 1.0) * avg_intensity
 
-        # Tekil Monoton Menisküs Kenar Halkası (Koloidal Tıkanma / Jamming Doyumu ile)
+        # Single Monotonic Meniscus Edge Ring (with Colloidal Jamming Saturation)
         edge_noise = fast_fractal_noise_gpu(self.width, self.height, 14.0, 3, device=self.device)
         ring_pos = 0.94 + (edge_noise - 0.5) * 0.04
         edge_ring = torch.exp(-((phi_unified - ring_pos) ** 2) / (2.0 * 0.070 ** 2))
-        jammed_edge_darkening = avg_edge_darkening / (1.0 + 0.50 * avg_intensity)
-        edge_alpha = edge_ring * jammed_edge_darkening * 0.60
+        jammed_edge_darkening = avg_edge_darkening / (1.0 + 0.30 * avg_intensity)
+        edge_alpha = edge_ring * jammed_edge_darkening * 0.75
 
-        vein_noise = (fast_fractal_noise_gpu(self.width, self.height, 14.0, 3, device=self.device) - 0.5) * avg_feathering * 0.20 * wash_kernel
-        alpha = torch.clamp(core_alpha + edge_alpha + vein_noise, 0.0, 1.0) * smooth_inside
+        vein_noise = (fast_fractal_noise_gpu(self.width, self.height, 14.0, 3, device=self.device) - 0.5) * avg_feathering * 0.15 * wash_kernel
+        # Balanced density: allows natural meniscus concentration above the body level
+        alpha = torch.clamp(core_alpha + edge_alpha + vein_noise, 0.0, 1.5) * smooth_inside
 
         grain = (torch.rand((self.height, self.width), device=self.device) * 2.0 - 1.0)
         granulation_bias = grain * self.paper.texture_norm * 0.05
         texture_bias = (0.5 - self.paper.texture_norm) * avg_paper_interaction
 
-        # Sıvı ve pigmenti yükle
-        self.fluid.h += alpha * 0.85
+        # Load fluid and pigment
+        self.fluid.h += torch.clamp(alpha, 0.0, 1.0) * 0.85
         safe_weights = torch.clamp(weight_sum, min=1e-6)
 
         for d in drops:
@@ -550,18 +596,19 @@ class WatercolorEngine:
                 granulation=d.get("granulation", 0.5),
                 staining=d.get("staining", 0.5),
             )
-            # Çoklu damlada oransal dağılım
+            # Proportional distribution across multiple drops
             dist_d = torch.sqrt((self.grid_x - d["x"]) ** 2 + (self.grid_y - d["y"]) ** 2)
             u_d = dist_d / max(d.get("radius", 50), 1.0)
             w_d = torch.exp(-0.5 * (torch.clamp(u_d / 0.65, 0.0, 3.0) ** 2)) * (u_d < 1.05).float()
             drop_share = (w_d / safe_weights) if len(drops) > 1 else torch.ones_like(alpha)
 
-            # Langmuir Doygunluk Kontrollü Pigment Yüklemesi
+            # Langmuir Saturation Controlled Pigment Deposition
             max_d = 2.6
             capacity_factor = torch.clamp((max_d - layer.d) / max_d, 0.15, 1.0)
-            deposit_weight = alpha * float(d.get("intensity", 1.0)) * drop_share * 2.5 * capacity_factor
+            deposit_weight = alpha * float(d.get("intensity", 1.0)) * drop_share * 2.2 * capacity_factor
 
-            initial_stain = max(0.40, 0.50 * layer.staining)
+            # In wet drops, initial stain is controlled so advection & Deegan drying can concentrate rim
+            initial_stain = max(0.08, 0.18 * layer.staining)
             layer.d += deposit_weight * initial_stain + (granulation_bias + texture_bias) * alpha
             layer.c += deposit_weight * (1.0 - initial_stain)
 
@@ -577,7 +624,7 @@ class WatercolorEngine:
         granulation: float = 0.5,
         staining: float = 0.5,
     ):
-        """Tekil damla bırakır."""
+        """Deposits a single fluid droplet."""
         self.add_pigment_cluster([{
             "x": cx, "y": cy,
             "radius": radius,
@@ -604,7 +651,7 @@ class WatercolorEngine:
         pigment_name: str = "Custom",
         seed: int = None,
     ):
-        """Organik sıçrama damlacıkları."""
+        """Organic splatter droplets."""
         rng = np.random.default_rng(seed)
         drops = []
         for _ in range(count):
@@ -627,7 +674,7 @@ class WatercolorEngine:
             self.add_pigment_cluster(drops)
 
     # ------------------------------------------------------------------
-    # Fiziksel Simülasyon Döngüsü (Makro Çözücü)
+    # Physical Simulation Loop (Macro Solver)
     # ------------------------------------------------------------------
 
     def step(
@@ -637,20 +684,20 @@ class WatercolorEngine:
         gravity_angle_deg: float = 90.0,
     ):
         """
-        Makro fiziksel simülasyon adımı (GPU):
-        - Sığ su basınç gradyanı ve akışı
-        - Kapiler birleşme
-        - Buharlaşma ve lif doygunluk emilimi
+        Macro physical simulation step (GPU):
+        - Shallow water pressure gradient and flow
+        - Capillary coalescence
+        - Evaporation and fiber saturation absorption
         """
         rad = math.radians(gravity_angle_deg)
-        f_ext_x = gravity_strength * math.cos(rad) * 450.0
-        f_ext_y = gravity_strength * math.sin(rad) * 450.0
+        f_ext_x = gravity_strength * math.cos(rad) * 35.0
+        f_ext_y = gravity_strength * math.sin(rad) * 35.0
 
-        # Kılcal Emilim
+        # Capillary Absorption
         absorbed_flux = self.paper.absorb_from_fluid(self.fluid.h, dt)
         self.paper.diffuse_fiber_moisture(dt)
 
-        # Sığ Su Çözümü
+        # Shallow Water Solution
         self.fluid.step(
             dt=dt,
             z_paper=self.paper.z_paper,
@@ -660,7 +707,7 @@ class WatercolorEngine:
             external_force_y=f_ext_y,
         )
 
-        # Pigment Adveksiyonu
+        # Pigment Advection
         scale_x = 2.0 / max(self.width, 1)
         scale_y = 2.0 / max(self.height, 1)
         disp_x = self.fluid.u * dt * scale_x
@@ -697,13 +744,14 @@ class WatercolorEngine:
     # ------------------------------------------------------------------
 
     def render(self) -> np.ndarray:
-        """Kubelka-Munk radyatif transfer ile GPU'da render alır."""
+        """Renders GPU canvas using Kubelka-Munk radiative transfer equations."""
         with torch.no_grad():
             rgb_tensor = self.optics.render(
                 pigment_layers=self.pigments.layers,
                 h_fluid=self.fluid.h,
                 m_paper=self.paper.m,
                 z_paper=self.paper.z_paper,
+                dried_glazes=self.dried_glazes,
             )
             arr = rgb_tensor.cpu().numpy().astype(np.uint8)
             return arr

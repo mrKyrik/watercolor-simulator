@@ -5,16 +5,16 @@ import torch.nn.functional as F
 
 class ShallowWaterSolver:
     """
-    2D Sığ Su (Shallow Water / Saint-Venant) ve Navier-Stokes Akışkan Çözücüsü
+    2D Shallow Water (Saint-Venant) and Navier-Stokes Fluid Solver
     
-    Fiziksel Korunum:
-    - Serbest sıvı katmanı kalınlığı h(x, y) >= 0
-    - Hız alanı u(x, y), v(x, y) (piksel/saniye)
-    - Kütle korunumlu Semi-Lagrangian Adveksiyonu (grid_sample)
-    - Hidrostatik basınç ve eğim ivmesi: -g * grad(h + z_paper)
-    - Yüzey gerilimi (Young-Laplace): gamma * grad(Laplace(h))
-    - Deegan dışa kılcal itki (Outward evaporative flux)
-    - Kılcal temas hattı kilitlenmesi (Pinning)
+    Physical Conservations:
+    - Free surface fluid thickness h(x, y) >= 0
+    - Velocity field u(x, y), v(x, y) (pixels/second)
+    - Mass-conserving Semi-Lagrangian Advection (grid_sample)
+    - Hydrostatic pressure and topographic slope acceleration: -g * grad(h + z_paper)
+    - Surface tension (Young-Laplace): gamma * grad(Laplace(h))
+    - Deegan outward capillary evaporative flux
+    - Capillary contact line pinning
     """
 
     def __init__(
@@ -72,7 +72,7 @@ class ShallowWaterSolver:
         wet_mask = (self.h > 1e-4)
 
         # -------------------------------------------------------------
-        # 1. SEMI-LAGRANGIAN ADVEKSİYON (u, v ve h alanlarının taşınımı)
+        # 1. SEMI-LAGRANGIAN ADVECTION (Transport of u, v, and h fields)
         # -------------------------------------------------------------
         scale_x = 2.0 / max(self.width, 1)
         scale_y = 2.0 / max(self.height, 1)
@@ -96,8 +96,8 @@ class ShallowWaterSolver:
         self.v = v_adv
 
         # -------------------------------------------------------------
-        # 2. HİDROSTATİK BASINÇ & TOPOGRAFİK EĞİM KUVVETİ
-        # Toplam Yükseklik: eta = h + z_paper * 3.5
+        # 2. HYDROSTATIC PRESSURE & TOPOGRAPHIC SLOPE FORCE
+        # Total Height: eta = h + z_paper * 3.5
         # -------------------------------------------------------------
         eta = self.h + z_paper * 3.5
         pad_eta = F.pad(eta.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="replicate").squeeze()
@@ -108,8 +108,8 @@ class ShallowWaterSolver:
         f_press_y = -self.g * grad_eta_y
 
         # -------------------------------------------------------------
-        # 3. YÜZEY GERİLİMİ (Young-Laplace Eğrilik Basıncı)
-        # Menisküs ve kapiler birleşme
+        # 3. SURFACE TENSION (Young-Laplace Curvature Pressure)
+        # Meniscus and capillary coalescence
         # -------------------------------------------------------------
         pad_h = F.pad(self.h.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="replicate")
         curv = F.conv2d(pad_h, self._laplace_kernel).squeeze()
@@ -122,7 +122,7 @@ class ShallowWaterSolver:
         f_cap_y = self.gamma * grad_curv_y
 
         # -------------------------------------------------------------
-        # 4. DEEGAN DIŞA DOĞRU KILCAL RADYAL AKIŞ
+        # 4. DEEGAN OUTWARD CAPILLARY RADIAL FLUX
         # -------------------------------------------------------------
         pad_h_raw = F.pad(self.h.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="replicate").squeeze()
         grad_h_x = 0.5 * (pad_h_raw[1:-1, 2:] - pad_h_raw[1:-1, :-2])
@@ -133,26 +133,34 @@ class ShallowWaterSolver:
         deegan_flux_y = -grad_h_y * edge_proximity * 40.0
 
         # -------------------------------------------------------------
-        # 5. HIZIN GÜNCELLENMESİ, HARİCİ YERÇEKİMİ VE SÖNÜMLEME
+        # 5. VELOCITY UPDATE, EXTERNAL GRAVITY & DAMPING
         # -------------------------------------------------------------
-        self.u += (f_press_x + f_cap_x + deegan_flux_x + external_force_x) * dt
-        self.v += (f_press_y + f_cap_y + deegan_flux_y + external_force_y) * dt
+        # Shallow Water acceleration in the wet domain
+        acc_x = f_press_x + f_cap_x + deegan_flux_x + external_force_x
+        acc_y = f_press_y + f_cap_y + deegan_flux_y + external_force_y
 
-        # Sürtünme ve Kağıt Lif Kilitlenmesi (Pinning)
-        # Temas hattında (h inceldiğinde) kağıt pürüzlülüğü akışı kilitler
-        edge_pin = pinning_mask * 1.6 * torch.clamp((0.20 - self.h) / 0.15, 0.0, 1.0)
-        friction = self.viscosity + (self.friction_coeff + edge_pin) / torch.clamp(self.h, min=0.04)
-        damping = torch.clamp(1.0 - friction * dt, min=0.0, max=1.0)
+        self.u += acc_x * dt
+        self.v += acc_y * dt
+
+        # Realistic bottom friction & contact-line pinning
+        # Deep pools have low friction; thin films near pinned contact line experience pinning
+        edge_pin = pinning_mask * 1.2 * torch.clamp((0.15 - self.h) / 0.12, 0.0, 1.0)
+        eff_depth = torch.clamp(self.h, min=0.03)
+        friction = self.viscosity + (self.friction_coeff * 0.15 + edge_pin * 0.4) / eff_depth
+        damping = torch.clamp(1.0 - friction * dt, min=0.05, max=1.0)
         self.u *= damping
         self.v *= damping
 
-        # Kuru sınırda yumuşak kılcal frenleme (Sert jilet kesimini önler)
-        edge_brake = torch.clamp(self.h / 0.02, 0.0, 1.0)
+        # Capillary braking strictly on dry canvas
+        dry_mask = (self.h <= 1e-4)
+        self.u[dry_mask] = 0.0
+        self.v[dry_mask] = 0.0
+        edge_brake = torch.clamp(self.h / 0.01, 0.0, 1.0)
         self.u *= edge_brake
         self.v *= edge_brake
 
         # -------------------------------------------------------------
-        # 6. BUHARLAŞMA VE KILCAL EMİLİM KAYBI (Kütle Korunumu)
+        # 6. EVAPORATION AND CAPILLARY ABSORPTION LOSS (Mass Conservation)
         # -------------------------------------------------------------
         edge_singularity = self.evap_edge_boost / torch.sqrt(torch.clamp(self.h, min=0.02))
         evaporation_flux = (self.evap_base + edge_singularity) * wet_mask.float()
@@ -160,7 +168,25 @@ class ShallowWaterSolver:
         dh = -evaporation_flux * dt - absorbed_flux
         self.h = torch.clamp(self.h + dh, min=0.0)
 
-        # Tuval sınırları
+        # Canvas boundary conditions
         self.h[0, :] = self.h[-1, :] = self.h[:, 0] = self.h[:, -1] = 0.0
         self.u[0, :] = self.u[-1, :] = self.u[:, 0] = self.u[:, -1] = 0.0
         self.v[0, :] = self.v[-1, :] = self.v[:, 0] = self.v[:, -1] = 0.0
+
+    def reset(self):
+        self.h.zero_()
+        self.u.zero_()
+        self.v.zero_()
+
+    def get_mass_and_center_of_mass(self) -> tuple[float, tuple[float, float]]:
+        """Computes total fluid mass and (x, y) center of mass in the wet domain."""
+        total_mass = float(self.h.sum().item())
+        if total_mass < 1e-6:
+            return 0.0, (0.0, 0.0)
+        
+        y_coords = torch.arange(self.height, device=self.device, dtype=torch.float32).view(-1, 1)
+        x_coords = torch.arange(self.width, device=self.device, dtype=torch.float32).view(1, -1)
+        
+        cm_x = float((self.h * x_coords).sum().item() / total_mass)
+        cm_y = float((self.h * y_coords).sum().item() / total_mass)
+        return total_mass, (cm_x, cm_y)

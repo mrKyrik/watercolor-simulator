@@ -12,8 +12,8 @@ def fast_fractal_noise_gpu(
     seed: int = None,
 ) -> torch.Tensor:
     """
-    GPU Üzerinde Ultra Hızlı Bikübik Fraktal Gürültü Motoru (Sub-millisecond Tensor Noise)
-    Kağıt lifleri, fırça kenar kırılmaları ve gövde pıhtılaşması için kullanılır.
+    GPU-Accelerated Ultra Fast Bicubic Fractal Noise Engine (Sub-millisecond Tensor Noise).
+    Used for paper fibers, brush edge tears, and body mottling effects.
     """
     if scale < 0.5:
         scale = 0.5

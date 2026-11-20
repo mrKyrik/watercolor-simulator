@@ -54,6 +54,7 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 .coding/
+.agents/
 
 # ------------------------------------------------------------------------------
 # Node / Frontend (my-app / next / react)

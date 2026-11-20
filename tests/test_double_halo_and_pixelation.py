@@ -8,11 +8,11 @@ from main import WaterColorCanvas
 
 
 def test_halo_and_pixelation():
-    print("\n--- TEST: ÇİFT HALE VE PİKSELLEŞME GİDERME TESTİ ---")
+    print("\n--- TEST: DOUBLE HALO AND PIXELATION ELIMINATION TEST ---")
     wc = WaterColorCanvas(width=800, height=600)
     wc.generate_paper_texture(scale=150.0, octaves=5, intensity=0.15)
 
-    # 1. Resim 1 ve 2'deki gibi yoğun, koyu mavi fırça darbesi (Geniş ve kıvrımlı)
+    # 1. Intense, dark blue brush stroke (Wide and curved)
     stroke_1 = [
         (150, 450),
         (250, 380),
@@ -31,7 +31,7 @@ def test_halo_and_pixelation():
         paper_interaction=0.12,
     )
 
-    # 2. Resimdeki kesişme testi: Stroke 1'i dik kesen ikinci yoğun darbe (Kesişim aşırı kararmasını test eder)
+    # 2. Intersection test: Second stroke intersecting stroke 1 (Tests intersection over-darkening)
     stroke_2 = [
         (420, 100),
         (400, 240),
@@ -54,7 +54,7 @@ def test_halo_and_pixelation():
 
     out_path = "test_output_anti_halo_smooth.png"
     wc.save_image(out_path)
-    print(f"Test çıktısı kaydedildi: {out_path}")
+    print(f"Test output saved: {out_path}")
 
 
 if __name__ == "__main__":

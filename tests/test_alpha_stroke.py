@@ -8,12 +8,11 @@ from main import WaterColorCanvas
 
 
 def test_alpha_stroke():
-    print("\n--- TEST: KULLANICININ ÇİZDİĞİ ALPHA (a) FIRÇA DARBESİ TESTİ ---")
+    print("\n--- TEST: ALPHA STROKE TEST ---")
     wc = WaterColorCanvas(width=700, height=550)
     wc.generate_paper_texture(scale=150.0, octaves=5, intensity=0.15)
 
-    # Kullanıcının çizdiği alfa döngüsü güzergahı
-    # Sağ alttan başlar, yukarı çıkar, sola ilmek atar, ortadan kesip sağ alta iner
+    # Alpha loop stroke path
     alpha_points = [
         (480, 440),
         (420, 320),
@@ -44,7 +43,7 @@ def test_alpha_stroke():
 
     out_path = "test_output_alpha_hybrid.png"
     wc.save_image(out_path)
-    print(f"Yeni hibrit alfa darbesi kaydedildi: {out_path}")
+    print(f"Hybrid alpha stroke saved: {out_path}")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 class PigmentLayer:
     """
-    Tekil bir Pigment Türünün Fiziksel Durumu ve Spektral Özellikleri
+    Physical State and Spectral Properties of a Single Pigment Species
     """
 
     def __init__(
@@ -30,21 +30,21 @@ class PigmentLayer:
         self.diffusivity = diffusivity
         self.device = device
 
-        # Durum Alanları (GPU)
-        self.c = torch.zeros((height, width), dtype=torch.float32, device=device)  # Askıdaki serbest pigment
-        self.d = torch.zeros((height, width), dtype=torch.float32, device=device)  # Kağıda kilitlenmiş pigment
+        # State Fields (GPU Tensors)
+        self.c = torch.zeros((height, width), dtype=torch.float32, device=device)  # Suspended free pigment
+        self.d = torch.zeros((height, width), dtype=torch.float32, device=device)  # Paper-pinned deposited pigment
 
 
 class PigmentManager:
     """
-    Koloidal Pigment Taşınım, Sedimantasyon, Granülasyon ve Deegan Kenar Yığılma Motoru
+    Colloidal Pigment Transport, Sedimentation, Granulation, and Deegan Edge Accumulation Engine
     """
 
-    # Gerçek Sanatçı Pigmentlerinin Spektrofotometrik Referans Verileri
+    # Spectrophotometric Reference Data of Real Artist Pigments
     ARTIST_PIGMENTS = {
         "Phthalo Blue": {
             "color": (0.00, 0.45, 0.85),
-            "k": (0.95, 0.04, 0.01),      # Kırmızı tam emilir, yeşil ve mavi sıfıra yakın geçer!
+            "k": (0.95, 0.04, 0.01),      # Red fully absorbed, green and blue transmitted near 100%
             "s": (0.05, 0.70, 0.95),
             "granulation": 0.08,
             "staining": 0.85,
@@ -54,13 +54,13 @@ class PigmentManager:
             "color": (0.12, 0.24, 0.88),
             "k": (0.85, 0.38, 0.02),
             "s": (0.15, 0.45, 0.90),
-            "granulation": 0.85,          # Yoğun vadi sedimantasyonu
+            "granulation": 0.85,          # Heavy valley sedimentation
             "staining": 0.35,
             "diffusivity": 0.06,
         },
         "Cadmium Yellow": {
             "color": (0.98, 0.85, 0.02),
-            "k": (0.01, 0.04, 0.98),      # Mavi tam emilir, kırmızı ve yeşil serbest yansır
+            "k": (0.01, 0.04, 0.98),      # Blue fully absorbed, red and green freely reflected
             "s": (0.95, 0.88, 0.05),
             "granulation": 0.25,
             "staining": 0.50,
@@ -68,7 +68,7 @@ class PigmentManager:
         },
         "Quinacridone Rose": {
             "color": (0.88, 0.10, 0.42),
-            "k": (0.04, 0.96, 0.20),      # Yeşil tam emilir, kırmızı ve mavi yansır (Macenta)
+            "k": (0.04, 0.96, 0.20),      # Green fully absorbed, red and blue reflected (Magenta)
             "s": (0.85, 0.10, 0.50),
             "granulation": 0.12,
             "staining": 0.80,
@@ -76,7 +76,7 @@ class PigmentManager:
         },
         "Cadmium Red": {
             "color": (0.88, 0.15, 0.12),
-            "k": (0.02, 0.92, 0.95),      # Yeşil ve mavi emilir, kırmızı tam yansır
+            "k": (0.02, 0.92, 0.95),      # Green and blue absorbed, red fully reflected
             "s": (0.90, 0.15, 0.10),
             "granulation": 0.35,
             "staining": 0.60,
@@ -86,7 +86,7 @@ class PigmentManager:
             "color": (0.42, 0.24, 0.12),
             "k": (0.55, 0.78, 0.88),
             "s": (0.40, 0.25, 0.15),
-            "granulation": 0.92,          # Maksimum mineral granülasyonu
+            "granulation": 0.92,          # Maximum mineral granulation
             "staining": 0.40,
             "diffusivity": 0.05,
         },
@@ -127,7 +127,7 @@ class PigmentManager:
             diff = spec["diffusivity"]
         else:
             col = color_rgb or (0.2, 0.5, 0.8)
-            # Otomatik K-S çıkarımı
+            # Automatic K-S estimation
             k = (max(0.01, 1.0 - col[0]), max(0.01, 1.0 - col[1]), max(0.01, 1.0 - col[2]))
             s = (max(0.05, col[0] * 0.8), max(0.05, col[1] * 0.8), max(0.05, col[2] * 0.8))
             gran = granulation
@@ -156,12 +156,12 @@ class PigmentManager:
         concentration: float = 1.0,
         initial_stain_ratio: float = 0.12,
     ):
-        """Fırça veya damla temasında pigmenti sıvı katmanına ve liflere bırakır."""
+        """Deposits pigment into fluid layer and fibers upon brush stroke or drop contact."""
         added = mask * concentration
-        # Sadece küçük bir kısım ilk anda liflere tutunur
+        # Only a small portion initial stains the fibers
         stain = added * initial_stain_ratio * layer.staining
         layer.d += stain
-        # Asıl büyük kısım serbest sıvı içinde asılı kalır ve akışla kenara sürüklenir
+        # The main bulk remains suspended in free fluid and is advected towards the boundary
         layer.c += (added - stain)
 
     def step(
@@ -175,55 +175,60 @@ class PigmentManager:
         sample_coords: torch.Tensor,
     ):
         """
-        Her pigment için adveksiyon, difüzyon, Deegan kenar kilitlenmesi ve granülasyon
+        Advection, diffusion, Deegan edge pinning, and granulation for each pigment layer.
         """
         speed = torch.sqrt(u ** 2 + v ** 2)
         valley_depth = torch.clamp(1.0 - z_paper / 0.25, 0.0, 1.0)
 
-        # Deegan Kenar Çökelme Koşulu:
-        # Sıvı filminin inceldiği (h < 0.20) temas hattında dengeli birikme
+        # Deegan Edge Deposition Condition:
+        # Balanced accumulation at the contact line where fluid thins (h < 0.20)
         edge_zone = torch.clamp((0.20 - h) / 0.18, 0.0, 1.0) * (pinning_mask * 0.5 + 0.5)
 
         for lyr in self.layers:
-            # 1. SEMI-LAGRANGIAN ADVEKSİYON (u, v hız alanıyla sürüklenme)
+            # 1. SEMI-LAGRANGIAN ADVECTION (Advection via velocity field u, v)
             c_in = lyr.c.unsqueeze(0).unsqueeze(0)
             c_adv = F.grid_sample(
                 c_in, sample_coords, mode="bilinear", padding_mode="border", align_corners=True
             ).squeeze()
 
-            # 2. BROWNİAN DİFÜZYON (Islak göllerde dinamik boya kaynaşması)
+            # 2. BROWNIAN DIFFUSION (Dynamic pigment blending in wet pools)
             pad_c = F.pad(c_adv.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1), mode="replicate")
             laplace_c = F.conv2d(pad_c, self._laplace_kernel).squeeze()
             wet_boost = 1.0 + 18.0 * torch.clamp(h / 0.25, 0.0, 1.0)
             c_diffused = torch.clamp(c_adv + lyr.diffusivity * wet_boost * laplace_c * dt * 4.0, min=0.0)
 
-            # 3. DEEGAN KENAR KOYULAŞMASI & VADİ GRANÜLASYONU
-            dryness = torch.clamp(1.0 - h / 0.10, 0.0, 1.0)
-            quiescence = torch.clamp(1.0 - speed / 2.0, 0.0, 1.0)
+            # 3. DEEGAN EDGE DARKENING & VALLEY GRANULATION
+            # Real Deegan mechanism: At the evaporating contact line (thin h, pinned boundary),
+            # particles jam and deposit heavily onto paper fibers.
+            dryness = torch.clamp((0.15 - h) / 0.14, 0.0, 1.0)
+            quiescence = torch.clamp(1.0 - speed / 1.8, 0.0, 1.0)
 
-            # Çökelme hızı:
-            # a) Kenar buharlaşma zonunda dengeli menisküs kilitlenmesi
-            # b) Vadilerde zengin mineral granülasyonu
-            # c) Kuruyan bölgelerde lif tutunması
+            # Capillary contact line pinning zone (high at thin rim, zero in deep center)
+            contact_line_zone = torch.clamp((0.22 - h) / 0.18, 0.0, 1.0) * (pinning_mask * 0.7 + 0.3)
+
+            # Deposition rate:
+            # - Rim accumulation: Strong deposition at the pinned contact line (authentic coffee ring)
+            # - Valley granulation: Heavy pigment settling into microscopic crevices
+            # - Gentle background deposition in drying pools
             deposit_rate = (
-                0.04 +
-                0.45 * edge_zone +
-                0.35 * dryness +
-                lyr.granulation * 0.65 * valley_depth * quiescence
+                0.02 +
+                0.85 * contact_line_zone +
+                0.25 * dryness +
+                lyr.granulation * 0.75 * valley_depth * quiescence
             )
-            deposit_amount = torch.min(c_diffused, c_diffused * deposit_rate * dt * 2.5)
+            deposit_amount = torch.min(c_diffused, c_diffused * deposit_rate * dt * 3.2)
 
             lyr.c = torch.clamp(c_diffused - deposit_amount, min=0.0)
             lyr.d += deposit_amount
 
-            # 4. YENİDEN KALKMA (LIFTING)
+            # 4. RE-LIFTING (Rewetting and shear-induced particle mobilization)
             if lyr.staining < 0.75:
-                lift_rate = 0.02 * (1.0 - lyr.staining) * torch.clamp(speed / 3.0, 0.0, 1.0) * (h > 0.15).float()
+                lift_rate = 0.015 * (1.0 - lyr.staining) * torch.clamp(speed / 2.5, 0.0, 1.0) * (h > 0.12).float()
                 lift_amount = torch.min(lyr.d, lyr.d * lift_rate * dt)
                 lyr.d -= lift_amount
                 lyr.c += lift_amount
 
-            # Sınır koşulları
+            # Boundary conditions
             lyr.c[0, :] = lyr.c[-1, :] = lyr.c[:, 0] = lyr.c[:, -1] = 0.0
             lyr.d[0, :] = lyr.d[-1, :] = lyr.d[:, 0] = lyr.d[:, -1] = 0.0
 

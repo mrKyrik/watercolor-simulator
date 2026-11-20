@@ -8,11 +8,11 @@ from main import WaterColorCanvas
 
 
 def test_high_pigment_pixelation():
-    print("\n--- TEST: YOĞUN PİGMENT KENAR PİKSELLEŞME VE MERDİVENLENME GİDERME TESTİ ---")
+    print("\n--- TEST: HIGH PIGMENT EDGE PIXELATION AND ANTI-ALIASING TEST ---")
     wc = WaterColorCanvas(width=600, height=300)
     wc.generate_paper_texture(scale=140.0, octaves=5, intensity=0.15)
 
-    # Yoğun, derin mavi fırça darbesi (Resim 1'deki gibi)
+    # Intense, deep blue brush stroke
     stroke_points = [
         (80, 150),
         (200, 145),
@@ -36,26 +36,26 @@ def test_high_pigment_pixelation():
     arr = wc.canvas.astype(np.uint8)
     out_path = "test_output_high_pigment_smooth.png"
     cv2.imwrite(out_path, cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
-    print(f"Test çıktısı kaydedildi: {out_path}")
+    print(f"Test output saved: {out_path}")
 
-    # Kenar kesiti spektrometrisi (Dikey kesit x=300)
-    # Üst kenardan geçen dikey dilim (y=100..130)
+    # Edge profile spectrometry (Vertical slice at x=300)
+    # Vertical slice passing through upper edge (y=100..130)
     slice_r = arr[100:130, 300, 0].astype(float)
     diffs = np.abs(np.diff(slice_r))
     max_jump = np.max(diffs)
     
-    print(f"Üst kenar dikey kesit (Kırmızı Kanal):\n{slice_r}")
-    print(f"Maksimum ardışık tek piksel renk sıçraması: {max_jump:.1f} (Mevcut bozuk motorda >160 idi)")
+    print(f"Upper edge vertical slice (Red Channel):\n{slice_r}")
+    print(f"Maximum single-pixel color jump: {max_jump:.1f}")
 
-    # Başarı kriteri:
-    # 1. Tek bir pikselde 120'den büyük yapay uçurum olmamalıdır.
-    # 2. Ara geçiş pikselleri (yarı tonlar) bulunmalıdır.
+    # Success criteria:
+    # 1. No artificial cliff jump greater than 120 in a single pixel.
+    # 2. Intermediate halftone transition pixels must exist.
     intermediate_pixels = np.sum((slice_r > 30) & (slice_r < 210))
-    print(f"Tespit edilen yarı-ton ara geçiş piksel sayısı: {intermediate_pixels}")
+    print(f"Detected halftone intermediate transition pixels: {intermediate_pixels}")
 
-    assert max_jump < 120, f"Kenarda hala çok sert renk sıçraması var! Max jump: {max_jump}"
-    assert intermediate_pixels >= 2, f"Yetersiz ara geçiş pikseli! Bulunan: {intermediate_pixels}"
-    print(">>> BAŞARILI: Yoğun pigment kenarı kesintisiz ve organik olarak yumuşatıldı, piksel basamakları giderildi!\n")
+    assert max_jump < 120, f"Harsh color jump still exists on edge! Max jump: {max_jump}"
+    assert intermediate_pixels >= 2, f"Insufficient intermediate transition pixels! Found: {intermediate_pixels}"
+    print(">>> SUCCESS: High pigment edge smoothly and organically anti-aliased, pixel staircasing eliminated!\n")
 
 
 if __name__ == "__main__":
